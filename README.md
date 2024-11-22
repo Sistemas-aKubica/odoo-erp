@@ -30,3 +30,46 @@ For a standard installation please follow the <a href="https://www.odoo.com/docu
 from the documentation.
 
 To learn the software, we recommend the <a href="https://www.odoo.com/slides">Odoo eLearning</a>, or <a href="https://www.odoo.com/page/scale-up-business-game">Scale-up</a>, the <a href="https://www.odoo.com/page/scale-up-business-game">business game</a>. Developers can start with <a href="https://www.odoo.com/documentation/master/developer/howtos.html">the developer tutorials</a>
+
+
+Installing Odoo
+-------------------------
+1. Install **Python 3.10** or later
+2. Create a **PostreSQL** database and a user
+````
+CREATE USER odoo WITH PASSWORD 'odoo_password';
+ALTER USER odoo CREATEDB;
+CREATE DATABASE odoo_db OWNER odoo;
+````
+3. Create the `odoo.conf` file in the root directory and add the database configuration
+```
+addons_path = addons
+db_host = localhost
+db_name = odoo_db
+db_password = odoo_password
+db_port = 5432
+db_user = odoo
+```
+4. Create a python virtual environment and install the dependencies
+```
+python -m venv odoo-venv
+odoo-venv\Scripts\activate
+pip install -r requirements.txt
+```
+5. Upgrade the database and run Odoo. 
+```
+python odoo-bin -c odoo.conf -d odoo_db -u all
+```
+Wait until you see the message *Registry loaded* and check that the database was successfully upgraded. (There should be many tables created)
+
+Open the browser and navigate to http://localhost:8069 to see the project. Login with the admin user.
+- email: admin
+- password: admin
+
+6. Go to **Apps** and activate the **Point of Sale** app.
+
+After completing these steps, you can also run Odoo with the following command. 
+````
+python odoo-bin -c odoo.conf --dev xml
+````
+This command will reflect changes made to xml files by just refreshing the page instead of restarting the server. 

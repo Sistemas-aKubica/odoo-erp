@@ -6,7 +6,7 @@ from markupsafe import Markup
 from itertools import groupby
 from collections import defaultdict
 from uuid import uuid4
-
+import requests
 import psycopg2
 import pytz
 
@@ -33,29 +33,43 @@ class PosOrder(models.Model):
         taxes = taxes.compute_all(price, line.order_id.currency_id, line.qty, product=line.product_id, partner=line.order_id.partner_id or False)['taxes']
         return sum(tax.get('amount', 0.0) for tax in taxes)
 
-    # This function deals with orders that belong to a closed session. It attempts to find
-    # any open session that can be used to capture the order. If no open session is found,
-    # an error is raised, asking the user to open a session.
+    # This deals with orders that belong to a closed session. In order
+    # to recover from this situation we create a new rescue session,
+    # making it obvious that something went wrong.
+    # A new, separate, rescue session is preferred for every such recovery,
+    # to avoid adding unrelated orders to live sessions.
     def _get_valid_session(self, order):
         PosSession = self.env['pos.session']
         closed_session = PosSession.browse(order['session_id'])
 
-        _logger.warning('Session %s (ID: %s) was closed but received order %s (total: %s) belonging to it',
+        _logger.warning('session %s (ID: %s) was closed but received order %s (total: %s) belonging to it',
                         closed_session.name,
                         closed_session.id,
                         order['name'],
                         order['amount_total'])
-
-        open_session = PosSession.search([
+        rescue_session = PosSession.search([
             ('state', 'not in', ('closed', 'closing_control')),
-            ('config_id', '=', closed_session.config_id.id)
+            ('rescue', '=', True),
+            ('config_id', '=', closed_session.config_id.id),
         ], limit=1)
+        if rescue_session:
+            _logger.warning('reusing recovery session %s for saving order %s', rescue_session.name, order['name'])
+            rescue_session.write({'state': 'opened'})
+            return rescue_session
 
-        if open_session:
-            _logger.warning('Using open session %s for saving order %s', open_session.name, order['name'])
-            return open_session
+        _logger.warning('attempting to create recovery session for saving order %s', order['name'])
+        new_session = PosSession.create({
+            'config_id': closed_session.config_id.id,
+            'name': _('(RESCUE FOR %(session)s)', session=closed_session.name),
+            'rescue': True,  # avoid conflict with live sessions
+        })
+        # bypass opening_control (necessary when using cash control)
+        new_session.action_pos_session_open()
+        if new_session.config_id.cash_control and new_session.rescue:
+            last_session = self.env['pos.session'].search([('config_id', '=', new_session.config_id.id), ('id', '!=', new_session.id)], limit=1)
+            new_session.cash_register_balance_start = last_session.cash_register_balance_end_real
 
-        raise UserError(_('No open session available. Please open a new session to capture the order.'))
+        return new_session
 
     @api.depends('sequence_number', 'session_id')
     def _compute_tracking_number(self):
@@ -1040,10 +1054,10 @@ class PosOrder(models.Model):
             order._ensure_access_token()
 
         # If the previous session is closed, the order will get a new session_id due to _get_valid_session in _process_order
-        is_new_session = any(order.get('session_id') not in session_ids for order in orders)
+        is_rescue_session = any(order.get('session_id') not in session_ids for order in orders)
         return {
             'pos.order': pos_order_ids.read(pos_order_ids._load_pos_data_fields(config_id), load=False) if config_id else [],
-            'pos.session': pos_order_ids.session_id._load_pos_data({})['data'] if config_id and is_new_session else [],
+            'pos.session': pos_order_ids.session_id._load_pos_data({})['data'] if config_id and is_rescue_session else [],
             'pos.payment': pos_order_ids.payment_ids.read(pos_order_ids.payment_ids._load_pos_data_fields(config_id), load=False) if config_id else [],
             'pos.order.line': pos_order_ids.lines.read(pos_order_ids.lines._load_pos_data_fields(config_id), load=False) if config_id else [],
             'pos.pack.operation.lot': pos_order_ids.lines.pack_lot_ids.read(pos_order_ids.lines.pack_lot_ids._load_pos_data_fields(config_id), load=False) if config_id else [],
@@ -1202,9 +1216,60 @@ class PosOrder(models.Model):
 
         return attachment
 
-    def action_send_receipt(self, email, ticket_image, basic_image):
-        self.env['mail.mail'].sudo().create(self._prepare_mail_values(email, ticket_image, basic_image)).send()
-        self.email = email
+       
+    def action_send_receipt(self, userIdentifier, ticket_image, basic_image, name):
+        if name == 'Email':
+            self.env['mail.mail'].sudo().create(self._prepare_mail_values(userIdentifier, ticket_image, basic_image)).send()
+            self.email = userIdentifier
+        elif name == 'Phone':
+            self.mobile = userIdentifier
+
+        self._action_send_receipt_atix(userIdentifier)
+        
+    def _action_send_receipt_atix(self, userIdentifier):
+        """Send ticket to Atix"""
+        url = 'http://localhost:4410/api/v1/pos-ticket'
+        headers = {'Content-Type': 'application/json'}
+        payload = {
+            'keyIdentifier': 'PETROMON',
+            'userIdentifier': userIdentifier,
+            'url': 'http://localhost:8069/jsonrpc',
+            'src': 'odoo',
+            'id': self.uuid
+        }
+        
+        print("########### SENDING TICKET TO ATIX ##############")
+        requests.post(url, json=payload, headers=headers)
+
+    @api.model
+    def get_ticket_atix(self, order_uuid):
+        print("########### GET TICKET FOR ATIX ##############", order_uuid)
+        
+        order = self.search([('uuid', '=', order_uuid)], limit=1)
+
+        if not order:
+            return {'error': f"Order with UUID {order_uuid} not found."}
+
+        lines = [{
+            'id': line.id,
+            'uuid': line.uuid,
+            'name': line.full_product_name,
+            'price_unit': line.price_unit,
+            'qty': line.qty,
+            'total': line.price_subtotal_incl
+        } for line in order.lines]
+        
+        result = {
+            'pos_reference': order.pos_reference,
+            'ticketNumber': order.ticket_code,
+            'date': order.date_order,
+            'order': order.name,
+            'total': order.amount_total,
+            'paid': order.amount_paid,
+            'products': lines,
+        }
+
+        return result
 
     @api.model
     def remove_from_ui(self, server_ids):

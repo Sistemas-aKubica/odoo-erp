@@ -6,10 +6,12 @@ import { useState, Component, onMounted } from "@odoo/owl";
 import { usePos } from "@point_of_sale/app/store/pos_hook";
 import { useService } from "@web/core/utils/hooks";
 import { ConfirmationDialog } from "@web/core/confirmation_dialog/confirmation_dialog";
+import { QRCodeComponent } from "../../components/qr_code_receipt/qr_code_receipt";
+import { UserQRCodeScanner } from "@point_of_sale/app/screens/receipt_screen/user_qr_code_scanner";
 
 export class ReceiptScreen extends Component {
     static template = "point_of_sale.ReceiptScreen";
-    static components = { OrderReceipt };
+    static components = { OrderReceipt, QRCodeComponent, UserQRCodeScanner };
     static props = {};
 
     setup() {
@@ -25,6 +27,8 @@ export class ReceiptScreen extends Component {
         this.state = useState({
             email: partner?.email || "",
             phone: partner?.mobile || "",
+            scanUser: false,
+            showQRCode: false
         });
         this.sendReceipt = useTrackedAsync(this._sendReceiptToCustomer.bind(this));
         this.doFullPrint = useTrackedAsync(() => this.pos.printReceipt());
@@ -44,6 +48,13 @@ export class ReceiptScreen extends Component {
             action: "action_send_receipt",
             destination: this.state.email,
             name: "Email",
+        });
+    }
+    actionSendReceiptWithPhone() {
+        this.sendReceipt.call({
+            action: "action_send_receipt",
+            destination: this.state.phone,
+            name: "Phone",
         });
     }
     get orderAmountPlusTip() {
@@ -95,7 +106,7 @@ export class ReceiptScreen extends Component {
             },
             { addClass: "pos-receipt-print p-3" }
         );
-    async _sendReceiptToCustomer({ action, destination }) {
+    async _sendReceiptToCustomer({ action, destination, name }) {
         const order = this.currentOrder;
         if (typeof order.id !== "number") {
             this.dialog.add(ConfirmationDialog, {
@@ -108,12 +119,32 @@ export class ReceiptScreen extends Component {
         }
         const fullTicketImage = await this.generateTicketImage();
         const basicTicketImage = await this.generateTicketImage(true);
+
+        console.log("SENDING TICKET TO " + destination + "BY " + name)
         await this.pos.data.call("pos.order", action, [
             [order.id],
             destination,
             fullTicketImage,
             this.pos.basic_receipt ? basicTicketImage : null,
+            name
         ]);
+    }
+    toggleShowQRCode() {
+        this.state.showQRCode = !this.state.showQRCode;
+        if (this.state.showQRCode) {
+            this.state.scanUser = false;
+        }
+    }
+    toggleScanUser() {
+        this.state.scanUser = !this.state.scanUser;
+        if (this.state.scanUser) {
+            this.state.showQRCode = false;
+        }
+    }
+
+    setEmail(email) {
+        this.state.email = email;
+        this.toggleScanUser();
     }
 }
 

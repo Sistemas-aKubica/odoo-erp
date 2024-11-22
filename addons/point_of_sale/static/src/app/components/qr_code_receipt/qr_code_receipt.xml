@@ -1,0 +1,8 @@
+<?xml version="1.0" encoding="UTF-8" ?>
+<templates xml:space="preserve">
+    <t t-name="receipt_screen.qr_code">
+        <div class="d-flex justify-content-center">
+            <img t-att-src="qrDataUrl" class="w-100" style="max-width: 300px" alt="QR Code" />
+        </div>
+    </t>
+</templates>
